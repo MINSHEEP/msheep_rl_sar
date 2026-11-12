@@ -1,0 +1,107 @@
+# Copyright (c) 2024-2026 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+# SocketCAN + HIPNUC HI91; mechanical zero equals URDF zero.
+dian:
+  devices:
+  - can0
+  - can1
+  - can2
+  - can3
+  rs03:
+    master_id: 253
+    position_range: 12.57
+    velocity_range: 20.0
+    torque_range: 60.0
+  imu:
+    device: /dev/ttyUSB0
+    baud: 115200
+    protocol: hi91_serial
+    R_body_sensor:
+    - 1
+    - 0
+    - 0
+    - 0
+    - 1
+    - 0
+    - 0
+    - 0
+    - 1
+  safety:
+    feedback_timeout: 0.1
+    startup_timeout: 3.0
+    stand_duration: 3.0
+    max_cycle: 0.04
+    max_temperature: 60.0
+    max_velocity: 15.0
+    max_torque: 25.0
+    max_tilt: 0.25
+    command_limits:
+    - 0.5
+    - 0.2
+    - 0.5
+  joints:
+  - name: FR_J1
+    device: 1
+    id: 5
+    sign: -1
+    zero: 0.0
+  - name: FR_J2
+    device: 1
+    id: 6
+    sign: -1
+    zero: 0.0
+  - name: FR_J3
+    device: 1
+    id: 7
+    sign: -1
+    zero: 0.0
+  - name: FL_J1
+    device: 0
+    id: 1
+    sign: -1
+    zero: 0.0
+  - name: FL_J2
+    device: 0
+    id: 2
+    sign: -1
+    zero: 0.0
+  - name: FL_J3
+    device: 0
+    id: 3
+    sign: -1
+    zero: 0.0
+  - name: RR_J1
+    device: 3
+    id: 13
+    sign: -1
+    zero: 0.0
+  - name: RR_J2
+    device: 3
+    id: 14
+    sign: -1
+    zero: 0.0
+  - name: RR_J3
+    device: 3
+    id: 15
+    sign: -1
+    zero: 0.0
+  - name: RL_J1
+    device: 2
+    id: 9
+    sign: -1
+    zero: 0.0
+  - name: RL_J2
+    device: 2
+    id: 10
+    sign: -1
+    zero: 0.0
+  - name: RL_J3
+    device: 2
+    id: 11
+    sign: -1
+    zero: 0.0
+  usb_paths:
+  - 1-1.4.1:1.0
+  - 1-1.4.2:1.0
+  - 1-1.4.3:1.0
+  - 1-1.4.4:1.0

@@ -1,0 +1,9 @@
+# Copyright (c) 2024-2026 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+# Native Linux joystick mapping read on 2026-11-11. This is not ROS /joy axis polarity.
+device: /dev/input/by-id/usb-_Controller-joystick
+deadzone: 0.10
+axes: [1, 0, 3] # forward, lateral, yaw
+signs: [-1, -1, -1] # forward/left/turn-left are positive
+buttons: [0, 1, 2, 3, 4, 5] # A B X Y LB RB
+dpad_vertical: 7 # negative = up
