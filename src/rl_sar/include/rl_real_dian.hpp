@@ -23,6 +23,7 @@ public:
     void SetCommand(const RobotCommand<float>* command) override;
     void ApplyOperator(const dian::PadOutput& pad);
     void BeginHold();
+    void BringupStep();
     void BeginStand();
     void StandStep();
     void BeginPolicy();
@@ -35,6 +36,7 @@ public:
     dian::PolicyContract contract;
     static volatile std::sig_atomic_t interrupted;
 private:
+    bool InPolicy() const;
     void Refresh();
     void SetTarget(const dian::Joints& target);
     void WriteTrace();
@@ -50,5 +52,5 @@ private:
     dian::Joints stand_start{};
     double stand_time=0,enabled_time=0;
     unsigned long control_tick=0;
-    bool enabled=false,send_authorized=false;
+    bool enabled=false,send_authorized=false,bringup=false;
 };

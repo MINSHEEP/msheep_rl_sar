@@ -168,6 +168,10 @@ RLRealDian::~RLRealDian()
 {
     try{Stop();}catch(const std::exception& e){std::cerr<<"STOP FAILED: "<<e.what()<<"; use physical emergency stop\n";}
 }
+bool RLRealDian::InPolicy() const
+{
+    return fsm.current_state_ && fsm.current_state_->GetStateName()=="RLFSMStateRLLocomotion";
+}
 void RLRealDian::Refresh()
 {
     if(hardware)sample=hardware->Snapshot();
@@ -229,9 +233,9 @@ void RLRealDian::ApplyOperator(const dian::PadOutput& pad)
 }
 void RLRealDian::BeginHold()
 {
-    if(enabled)return;
+    if(enabled || bringup)return;
     send_authorized=true;
-    if(hardware)hardware->Prepare();
+    if(hardware){hardware->BeginBringup();bringup=true;return;}
     const double deadline=dian::Now()+config.startup_timeout;
     do
     {
@@ -244,9 +248,27 @@ void RLRealDian::BeginHold()
     dian::CheckState(config,sample,dian::Now(),false);
     SetTarget(sample.q);stand_done=false;
     if(interrupted)return;
-    if(hardware)hardware->Enable();
     enabled=true;enabled_time=dian::Now();
     std::cout<<"Motors enabled; holding measured pose. "<<(keyboard?"Press 0 to stand.":"Press A to stand.")<<'\n';
+}
+void RLRealDian::BringupStep()
+{
+    if(!bringup)return;
+    try
+    {
+        if(interrupted){Stop();return;}
+        if(!hardware->Advance())return;
+        Refresh();
+        dian::CheckState(config,sample,dian::Now(),false);
+        SetTarget(sample.q);stand_done=false;
+        enabled=true;enabled_time=dian::Now();bringup=false;
+        std::cout<<"Motors enabled; holding measured pose. "<<(keyboard?"Press 0 to stand.":"Press A to stand.")<<'\n';
+    }
+    catch(...)
+    {
+        Stop();
+        throw;
+    }
 }
 void RLRealDian::BeginStand()
 {
@@ -279,6 +301,8 @@ void RLRealDian::PolicyStep()
 }
 void RLRealDian::Stop()
 {
+    bringup=false;
+    if(hardware)hardware->CancelBringup();
     if(send_authorized && hardware)hardware->Disable();
     enabled=false;send_authorized=false;stand_done=false;
 }
@@ -391,12 +415,12 @@ void RLRealDian::Run(double duration)
                 if(keyboard->QuitRequested())break;
             }
             Refresh();
-            if(enabled)dian::CheckState(config,sample,dian::Now(),true);
+            if(enabled)dian::CheckState(config,sample,dian::Now(),true,InPolicy());
             const bool was_enabled=enabled;
             StateController(&robot_state,&robot_command);
             const double cycle_start=(!was_enabled && enabled)?dian::Now():now;
             Refresh();
-            if(enabled)dian::CheckState(config,sample,dian::Now(),true);
+            if(enabled)dian::CheckState(config,sample,dian::Now(),true,InPolicy());
             if(was_enabled && enabled && dian::Now()-cycle_start>config.max_cycle)
                 throw std::runtime_error("Inference/control deadline missed");
             if(enabled && !interrupted)SetCommand(&robot_command);
@@ -411,6 +435,7 @@ void RLRealDian::Run(double duration)
     }
     catch(const std::exception& error)
     {
+        try{Stop();}catch(...){}
         try{NoteStop(error.what());}catch(...){}
         throw;
     }

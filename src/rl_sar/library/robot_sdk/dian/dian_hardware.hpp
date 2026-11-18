@@ -57,84 +57,106 @@ public:
         std::array<int,12> run_mode{};
         std::array<uint32_t,12> watchdog{};
     };
-    Readback Query(bool limits=false)
+    Readback Query(bool limits=false,bool include_torque=true)
     {
-        {
-            std::lock_guard<std::mutex> lock(mutex);query_seen.fill(0);
-        }
-        for(const auto& j:cfg.joints)
-            for(uint16_t index:{0x7019,0x701b,0x7005,0x700b,0x7028})
-                if(limits || (index!=0x700b && index!=0x7028))Send(j,cfg.protocol.ReadParameter(j.id,index));
-        const double deadline=Now()+cfg.startup_timeout;
-        while(Now()<deadline)
+        BeginRead(limits,include_torque);
+        while(!Advance())
         {
             CancelCheck();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return readback;
+    }
+    void BeginBringup()
+    {
+        CancelBringup();
+        const float torque=25.f;std::memcpy(&torque_bits,&torque,sizeof(torque_bits));
+        FillReads(true,false);
+        read_only=false;phase=Phase::Stop;cursor_joint=0;cursor_step=0;
+    }
+    void CancelBringup()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        phase=Phase::Idle;waiting=false;reply_ready=false;read_only=false;enable_armed=false;
+    }
+    // One CAN exchange per call. The control loop keeps running between calls.
+    bool Advance()
+    {
+        CancelCheck();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if(error)std::rethrow_exception(error);
+            if(phase==Phase::Ready)return true;
+            if(phase==Phase::Idle)return false;
+        }
+        if(phase==Phase::Stop)
+        {
+            Send(cfg.joints[cursor_joint],cfg.protocol.Service(cfg.joints[cursor_joint].id,4));
+            if(++cursor_joint==12){phase=Phase::Write;cursor_joint=0;cursor_step=0;}
+            return false;
+        }
+        if(phase==Phase::Write)
+        {
+            const auto& j=cfg.joints[cursor_joint];
+            if(cursor_step==0)Send(j,cfg.protocol.MotionMode(j.id));
+            else if(cursor_step==1)Send(j,cfg.protocol.WriteParameter(j.id,0x7028,2000));
+            else Send(j,cfg.protocol.WriteParameter(j.id,0x700b,torque_bits));
+            if(++cursor_step==3){cursor_step=0;if(++cursor_joint==12){phase=Phase::Read;cursor_joint=0;}}
+            return false;
+        }
+        if(phase==Phase::Read)
+        {
+            if(!waiting){ArmRead();return false;}
+            bool ready=false;
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 if(error)std::rethrow_exception(error);
-                if(std::all_of(query_seen.begin(),query_seen.end(),[limits](int value){return (value&(limits?31:7))==(limits?31:7);}))return readback;
+                ready=reply_ready;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            if(!ready)
+            {
+                if(Now()>read_deadline)ThrowMissing();
+                return false;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                waiting=false;reply_ready=false;
+            }
+            if(++cursor_step==read_count)
+            {
+                cursor_step=0;
+                if(++cursor_joint==12)return FinishReads();
+            }
+            ArmRead();
+            return false;
         }
-        std::ostringstream message;
-        message<<"Type17 readback incomplete:";
-        const std::array<uint16_t,5> parameters{0x7019,0x701b,0x7005,0x700b,0x7028};
-        std::lock_guard<std::mutex> lock(mutex);
-        for(int i=0;i<12;++i)
-            for(int k=0;k<(limits?5:3);++k)
-                if(!(query_seen[i]&(1<<k)))
-                    message<<" ["<<cfg.devices[cfg.joints[i].device]<<" id="<<cfg.joints[i].id
-                           <<" missing=0x"<<std::hex<<parameters[k]<<std::dec<<']';
-        throw std::runtime_error(message.str());
-    }
-    void Prepare()
-    {
-        Disable();
-        CancelCheck();
-        const float torque=25.f;uint32_t bits;std::memcpy(&bits,&torque,sizeof(bits));
-        for(const auto& j:cfg.joints)
+        if(phase==Phase::Feedback)
         {
-            CancelCheck();
-            Send(j,cfg.protocol.MotionMode(j.id));
-            Send(j,cfg.protocol.WriteParameter(j.id,0x7028,2000)); // Reference firmware: 100 ms.
-            Send(j,cfg.protocol.WriteParameter(j.id,0x700b,bits));
+            const auto s=Snapshot();
+            const bool motors=*std::min_element(s.motor_time.begin(),s.motor_time.end())>0;
+            if(s.imu_time>0 && motors){phase=Phase::Enable;cursor_joint=0;enable_armed=false;return false;}
+            if(Now()>feedback_deadline)throw std::runtime_error("Startup feedback timeout");
+            return false;
         }
-        const auto initial=Query(true);
-        std::ostringstream mismatch;
-        for(int i=0;i<12;++i)
+        if(!enable_armed)
         {
-            if(initial.run_mode[i]!=0 || initial.watchdog[i]!=2000 || !std::isfinite(initial.torque_limit[i]) ||
-               initial.torque_limit[i]<=0 || initial.torque_limit[i]>25.001)
-                mismatch<<" ["<<cfg.devices[cfg.joints[i].device]<<" id="<<cfg.joints[i].id
-                        <<" run_mode="<<initial.run_mode[i]<<" watchdog_raw="<<initial.watchdog[i]
-                        <<" torque_limit_nm="<<initial.torque_limit[i]<<']';
-        }
-        if(!mismatch.str().empty())
-            throw std::runtime_error("Motor parameter mismatch (expected mode=0, watchdog_raw=2000, "
-                                     "0<torque_limit_nm<=25.001):"+mismatch.str());
-    }
-    void Enable()
-    {
-        const double started=Now();
-        for(const auto& j:cfg.joints)
-        {
+            const auto& j=cfg.joints[cursor_joint];
             Send(j,cfg.protocol.Command(j.id,0,0,0,0));
             Send(j,cfg.protocol.Service(j.id,3));
+            if(++cursor_joint==12){enable_armed=true;enable_started=Now();cursor_joint=0;}
+            return false;
         }
-        while(Now()-started<cfg.startup_timeout)
+        const auto s=Snapshot();bool ready=true;
+        for(int i=0;i<12;++i)
         {
-            CancelCheck();
-            const auto s=Snapshot();bool ready=true;
-            for(int i=0;i<12;++i)
-            {
-                if(s.fault[i])throw std::runtime_error("Motor fault during enable");
-                ready=ready && s.mode[i]==2 && s.motor_time[i]>started;
-            }
-            if(ready)return;
-            for(const auto& j:cfg.joints)Send(j,cfg.protocol.Command(j.id,0,0,0,0));
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if(s.fault[i])throw std::runtime_error("Motor fault during enable");
+            ready=ready && s.mode[i]==2 && s.motor_time[i]>enable_started;
         }
-        throw std::runtime_error("Incomplete motor enable feedback");
+        if(ready){phase=Phase::Ready;return true;}
+        if(Now()-enable_started>cfg.startup_timeout)throw std::runtime_error("Incomplete motor enable feedback");
+        Send(cfg.joints[cursor_joint%12],cfg.protocol.Command(cfg.joints[cursor_joint%12].id,0,0,0,0));
+        ++cursor_joint;
+        return false;
     }
     void Disable()
     {
@@ -160,6 +182,58 @@ private:
     void CancelCheck()
     {
         if(cancelled && cancelled())throw std::runtime_error("Operator cancelled motor startup");
+    }
+    enum class Phase { Idle, Stop, Write, Read, Feedback, Enable, Ready };
+    void FillReads(bool limits,bool include_torque)
+    {
+        read_count=0;
+        for(uint16_t index:{uint16_t{0x7019},uint16_t{0x701b},uint16_t{0x7005},uint16_t{0x700b},uint16_t{0x7028}})
+            if((limits || (index!=0x700b && index!=0x7028)) && (include_torque || index!=0x700b))
+                read_list[read_count++]=index;
+    }
+    void BeginRead(bool limits,bool include_torque)
+    {
+        CancelBringup();
+        FillReads(limits,include_torque);
+        read_only=true;phase=Phase::Read;cursor_joint=0;cursor_step=0;
+    }
+    void ArmRead()
+    {
+        const auto index=read_list[cursor_step];
+        const auto& j=cfg.joints[cursor_joint];
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if(error)std::rethrow_exception(error);
+            expect_joint=cursor_joint;expect_index=index;reply_ready=false;waiting=true;
+            read_deadline=Now()+0.5;
+        }
+        Send(j,cfg.protocol.ReadParameter(j.id,index));
+    }
+    bool FinishReads()
+    {
+        Readback initial;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            initial=readback;
+        }
+        if(read_only){phase=Phase::Ready;return true;}
+        std::ostringstream mismatch;
+        for(int i=0;i<12;++i)
+            if(initial.run_mode[i]!=0 || initial.watchdog[i]!=2000)
+                mismatch<<" ["<<cfg.devices[cfg.joints[i].device]<<" id="<<cfg.joints[i].id
+                        <<" run_mode="<<initial.run_mode[i]<<" watchdog_raw="<<initial.watchdog[i]<<']';
+        if(!mismatch.str().empty())
+            throw std::runtime_error("Motor parameter mismatch (expected mode=0, watchdog_raw=2000):"+mismatch.str());
+        phase=Phase::Feedback;feedback_deadline=Now()+cfg.startup_timeout;
+        return false;
+    }
+    void ThrowMissing()
+    {
+        const auto& j=cfg.joints[expect_joint];
+        std::ostringstream message;
+        message<<"Type17 readback incomplete: ["<<cfg.devices[j.device]<<" id="<<j.id
+               <<" missing=0x"<<std::hex<<expect_index<<std::dec<<']';
+        throw std::runtime_error(message.str());
     }
     int OpenSocketCAN(const std::string& name,const std::string& usb_path)
     {
@@ -231,6 +305,7 @@ private:
                     else if(index==0x7005){readback.run_mode[i]=frame.data[4];query_seen[i]|=4;}
                     else if(index==0x700b){readback.torque_limit[i]=value;query_seen[i]|=8;}
                     else if(index==0x7028){readback.watchdog[i]=bits;query_seen[i]|=16;}
+                    if(waiting && i==expect_joint && index==expect_index)reply_ready=true;
                 }
                 continue;
             }
@@ -258,10 +333,12 @@ private:
             if(!hi91->poll(20))continue;
             const auto& packet=*hi91->decoder().latest();
             const auto body=custom_quad::imu::to_body(packet,qmount);
+            const double time=std::chrono::duration<double>(packet.received_at.time_since_epoch()).count();
             std::lock_guard<std::mutex> lock(mutex);
-            state.gravity=body.projected_gravity;state.gyro=body.angular_velocity_rad_s;
+            imu_filter.Update(body.angular_velocity_rad_s,body.projected_gravity,time);
+            state.gravity=imu_filter.gravity;state.gyro=imu_filter.gyro;
             state.quaternion=body.quaternion_wxyz;state.acceleration=body.acceleration_m_s2;
-            state.imu_time=std::chrono::duration<double>(packet.received_at.time_since_epoch()).count();
+            state.imu_time=time;
         }
     }
     void Close()
@@ -272,7 +349,12 @@ private:
         buses.clear();
         for(int fd:can_locks)close(fd);can_locks.clear();
     }
-    Config cfg;Sample state;Readback readback;std::array<int,12> query_seen{};
+    Config cfg;Sample state;Readback readback;ImuFilter imu_filter;std::array<int,12> query_seen{};
+    Phase phase=Phase::Idle;bool read_only=false,waiting=false,reply_ready=false,enable_armed=false;
+    int cursor_joint=0,cursor_step=0,read_count=0,expect_joint=-1;
+    uint16_t expect_index=0;uint32_t torque_bits=0;
+    double read_deadline=0,feedback_deadline=0,enable_started=0;
+    std::array<uint16_t,5> read_list{};
     std::unique_ptr<custom_quad::imu::SerialReader> hi91;
     std::vector<int> buses,can_locks;
     std::atomic<bool> stopping{false};std::vector<std::thread> readers;

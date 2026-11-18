@@ -22,6 +22,7 @@ public:
     }
     void Run() override
     {
+        if(state_name_=="RLFSMStateHold")app.BringupStep();
         if(state_name_=="RLFSMStateGetUp")app.StandStep();
         if(state_name_=="RLFSMStateRLLocomotion")app.PolicyStep();
     }

@@ -44,6 +44,16 @@ int main(int argc,char** argv)
         auto outside=sample;outside.q[8]=cfg.policy.upper[8]+0.5;outside.temperature[0]=100;
         outside.torque[0]=61;outside.dq[0]=30;outside.gravity={0,0.6,-0.8};
         dian::CheckState(cfg,outside,dian::Now(),false);
+        outside.mode.fill(2);
+        dian::CheckState(cfg,outside,dian::Now(),true,false);
+        Reject([&]{dian::CheckState(cfg,outside,dian::Now(),true,true);});
+        dian::ImuFilter filter;
+        filter.Update({0,0,0},{0,0,-1},1);
+        filter.Update({1,0,0},{0,0,-1},1.005);
+        Require(std::abs(filter.gyro[0]-0.2)<1e-9,"IMU gyro step must follow a 20 ms low-pass");
+        Require(std::abs(dian::Norm(filter.gravity)-1)<1e-9,"Filtered gravity must stay a unit vector");
+        filter.Update({4,0,0},{0,0,-1},1.2);
+        Require(std::abs(filter.gyro[0]-4)<1e-9,"A stale IMU sample must reset the filter");
         for(int test=0;test<4;++test)
         {
             auto bad=sample;

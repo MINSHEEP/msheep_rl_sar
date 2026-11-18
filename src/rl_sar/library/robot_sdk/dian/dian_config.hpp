@@ -8,6 +8,7 @@
 #include <yaml-cpp/yaml.h>
 #include <filesystem>
 #include <set>
+#include <sstream>
 #include <utility>
 
 namespace dian
@@ -115,19 +116,54 @@ struct Config
     }
 
 };
-inline void CheckState(const Config& c,const Sample& s,double now,bool running)
+inline constexpr const char* kJointNames[12]={
+    "FR_J1","FR_J2","FR_J3","FL_J1","FL_J2","FL_J3","RR_J1","RR_J2","RR_J3","RL_J1","RL_J2","RL_J3"};
+struct ImuFilter
+{
+    double tau=0.02;
+    bool ready=false;
+    double time=0;
+    Vec3 gyro{},gravity{0,0,-1};
+    void Update(const Vec3& measured_gyro,const Vec3& measured_gravity,double t)
+    {
+        Finite(measured_gyro,"gyro");Finite(measured_gravity,"gravity");
+        if(!std::isfinite(t))throw std::runtime_error("Non-finite imu time");
+        const double gap=t-time;
+        if(!ready || gap<=0 || gap>0.05)
+        {
+            gyro=measured_gyro;gravity=measured_gravity;time=t;ready=true;return;
+        }
+        const double alpha=gap/(tau+gap);
+        for(int i=0;i<3;++i)
+        {
+            gyro[i]+=alpha*(measured_gyro[i]-gyro[i]);
+            gravity[i]+=alpha*(measured_gravity[i]-gravity[i]);
+        }
+        const double norm=Norm(gravity);
+        if(norm<1e-6)gravity=measured_gravity;
+        else for(int i=0;i<3;++i)gravity[i]/=norm;
+        time=t;
+    }
+};
+inline void CheckState(const Config& c,const Sample& s,double now,bool running,bool enforce_joint_limits=false)
 {
     Finite(s.q,"q");Finite(s.dq,"dq");Finite(s.torque,"torque");Finite(s.temperature,"temperature");
     Finite(s.motor_time,"motor time");Finite(s.gyro,"gyro");Finite(s.gravity,"gravity");
     if(!std::isfinite(s.imu_time) || s.imu_time<=0 || now-s.imu_time>c.timeout || now<s.imu_time)
         throw std::runtime_error("Stale IMU");
-    // Projected gravity is a unit vector. Attitude, joint position, temperature, speed and
-    // torque are not interlocks: policy target bounds stay a command clamp only.
+    // Projected gravity is a unit vector. Attitude, temperature, speed and torque are not
+    // interlocks. Measured joint limits stop only an active policy.
     if(std::abs(Norm(s.gravity)-1)>0.02)throw std::runtime_error("Invalid gravity");
     for(int i=0;i<12;++i)
     {
         if(s.motor_time[i]<=0 || now-s.motor_time[i]>c.timeout || now<s.motor_time[i])throw std::runtime_error("Stale motor feedback");
         if(s.fault[i] || (running && s.mode[i]!=2))throw std::runtime_error("Motor fault/not running");
+        if(enforce_joint_limits && (s.q[i]<c.policy.lower[i] || s.q[i]>c.policy.upper[i]))
+        {
+            std::ostringstream message;
+            message<<kJointNames[i]<<" position "<<s.q[i]<<" exceeds ["<<c.policy.lower[i]<<", "<<c.policy.upper[i]<<"]";
+            throw std::runtime_error(message.str());
+        }
     }
 }
 }
